@@ -8,7 +8,7 @@ import sys
 from datetime import datetime
 from dotenv import load_dotenv
 
-# Загружаем переменные из .env файла (он должен лежать рядом)
+# Загружаем переменные из .env файла
 load_dotenv()
 
 # ================= НАСТРОЙКИ ИЗ ENV =================
@@ -23,17 +23,24 @@ if not SP_DC_COOKIE or not PLAYLIST_ID:
 # ====================================================
 
 def get_token_from_cookie(sp_dc):
+    # ! ИСПРАВЛЕНО: Теперь тут настоящая ссылка Spotify API
     url = "https://open.spotify.com/get_access_token?reason=transport&productType=web_player"
     headers = {
         "Cookie": f"sp_dc={sp_dc}",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
     }
     try:
         response = requests.get(url, headers=headers)
         response.raise_for_status()
+        # В ответе приходит JSON, где токен лежит в поле "accessToken"
         return response.json()["accessToken"]
     except Exception as e:
         print(f"Ошибка получения токена: {e}")
+        # Если ошибка — выводим ответ сервера, чтобы понять причину
+        try:
+            print(f"Ответ сервера: {response.text}")
+        except:
+            pass
         return None
 
 def get_auth_client():
@@ -56,7 +63,7 @@ def check_new_releases():
     print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M')}] Начинаю проверку...")
     sp = get_auth_client()
     if not sp:
-        print("Не удалось авторизоваться. Проверь cookie.")
+        print("Не удалось авторизоваться. Проверь cookie SP_DC в .env")
         return
 
     data = load_data()
@@ -69,7 +76,7 @@ def check_new_releases():
         artists = results['artists']['items']
         
         for artist in artists:
-            # country="UA" — важно, чтобы трек был доступен в твоем регионе
+            # country="UA" — важно для доступности треков
             albums = sp.artist_albums(artist['id'], limit=5, country="UA")
             
             for album in albums['items']:
@@ -85,7 +92,7 @@ def check_new_releases():
 
         if new_tracks_uris:
             unique_uris = list(set(new_tracks_uris))
-            # Разбиваем на пачки по 100 треков (ограничение API)
+            # Разбиваем на пачки по 100 треков
             for i in range(0, len(unique_uris), 100):
                 sp.playlist_add_items(PLAYLIST_ID, unique_uris[i:i+100])
             
@@ -95,18 +102,19 @@ def check_new_releases():
             print("Новых релизов нет.")
             
     except Exception as e:
-        print(f"Произошла ошибка: {e}")
+        print(f"Произошла ошибка при сканировании: {e}")
 
 # ================= ЗАПУСК =================
 if __name__ == "__main__":
-    print("Бот запущен. Ожидаю расписания...")
+    print("Бот запущен. Первая проверка...")
     
-    # Можно раскомментировать для теста при запуске:
+    # Запускаем проверку сразу при старте
     check_new_releases()
 
     schedule.every().day.at("09:00").do(check_new_releases)
     schedule.every().day.at("21:00").do(check_new_releases)
 
+    print("Ожидаю следующего запуска по расписанию...")
     while True:
         schedule.run_pending()
         time.sleep(60)
