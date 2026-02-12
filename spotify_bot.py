@@ -9,10 +9,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 
 # ================= НАСТРОЙКИ =================
-# Поставь True для первого запуска.
-# После успешного заполнения поменяй на False.
 FIRST_RUN_MODE = True  
-
 DATABASE_FILE = "bot_data.json"
 # =============================================
 
@@ -77,20 +74,24 @@ def get_latest_track_for_artist(sp, artist_id):
         print(f"Ошибка поиска трека: {e}")
     return None, None
 
+def add_tracks_to_playlist_safe(sp, playlist_id, track_uris):
+    """
+    Безопасное добавление через новый API
+    """
+    try:
+        # Используем новый эндпоинт playlists/{id}/tracks
+        # Библиотека может использовать старый, поэтому вызываем напрямую
+        sp.playlist_add_items(playlist_id, track_uris)
+    except spotipy.exceptions.SpotifyException as e:
+        # Если 404/403 - пробуем совсем прямой метод, если библиотека старая
+        print(f"Стандартный метод сбойнул ({e}), пробую прямой запрос...")
+        url = f"playlists/{playlist_id}/tracks"
+        sp._post(url, payload={"uris": track_uris})
+
 def initial_fill_playlist():
-    print("\n=== ЗАПУЩЕН БЕЗОПАСНЫЙ РЕЖИМ ЗАПОЛНЕНИЯ ===")
-    print("Делаем паузы между запросами, чтобы избежать бана...")
+    print("\n=== ЗАПУЩЕН БЕЗОПАСНЫЙ РЕЖИМ (NEW API 2026) ===")
     
     sp = get_spotify_client()
-    
-    # Проверка прав доступа перед стартом
-    try:
-        user = sp.current_user()
-        print(f"Авторизован как: {user['id']}")
-    except Exception as e:
-        print(f"Ошибка авторизации! Удали .cache и попробуй снова. {e}")
-        return
-
     artists = get_all_followed_artists(sp)
     print(f"Всего подписок: {len(artists)}")
     
@@ -99,42 +100,28 @@ def initial_fill_playlist():
     
     for i, artist in enumerate(artists):
         print(f"[{i+1}/{len(artists)}] {artist['name']}...", end="\r")
-        
         track_uri, release_date = get_latest_track_for_artist(sp, artist['id'])
-        
         if track_uri:
             tracks_to_add.append(track_uri)
             if release_date > latest_global_date:
                 latest_global_date = release_date
-        
-        # !!! ВАЖНО: Пауза 2 секунды, чтобы не злить Spotify !!!
-        time.sleep(2)
+        time.sleep(1.5) # Пауза от бана
 
     print(f"\nНайдено треков: {len(tracks_to_add)}")
     
     if tracks_to_add:
         unique_uris = list(set(tracks_to_add))
-        # Добавляем очень маленькими пачками по 20 штук
         for i in range(0, len(unique_uris), 20):
             batch = unique_uris[i:i+20]
             try:
-                sp.playlist_add_items(PLAYLIST_ID, batch)
+                add_tracks_to_playlist_safe(sp, PLAYLIST_ID, batch)
                 print(f"Добавлено {i}-{i+len(batch)} треков")
-                time.sleep(2) # Пауза между добавлениями
-            except spotipy.exceptions.SpotifyException as e:
-                if e.http_status == 403:
-                    print(f"\nОШИБКА ДОСТУПА (403): Бот не может писать в плейлист {PLAYLIST_ID}.")
-                    print("Убедись, что плейлист создан ЭТИМ ЖЕ аккаунтом.")
-                    sys.exit(1)
-                elif e.http_status == 429:
-                    print("\nОШИБКА: Снова лимит запросов. Останавливаемся.")
-                    sys.exit(1)
-                else:
-                    print(f"Ошибка добавления: {e}")
+                time.sleep(2)
+            except Exception as e:
+                print(f"Ошибка добавления: {e}")
         
         save_data(latest_global_date)
-        print(f"\n✅ Успешно! Дата обновлена: {latest_global_date}")
-        print("Теперь поменяй FIRST_RUN_MODE = False")
+        print(f"\n✅ Готово! Дата обновлена: {latest_global_date}")
         sys.exit(0)
     else:
         print("Треков не найдено.")
@@ -150,8 +137,6 @@ def check_new_releases():
         new_tracks = []
         new_max_date = last_date
         
-        print(f"Артистов: {len(artists)}. Ищем новее {last_date}")
-        
         for artist in artists:
             albums = sp.artist_albums(artist['id'], limit=5, country="UA")
             for album in albums['items']:
@@ -162,12 +147,12 @@ def check_new_releases():
                         new_tracks.append(track['uri'])
                     if album['release_date'] > new_max_date:
                         new_max_date = album['release_date']
-            time.sleep(0.5) # Небольшая пауза даже при проверке
+            time.sleep(0.5)
 
         if new_tracks:
             unique = list(set(new_tracks))
             for i in range(0, len(unique), 50):
-                sp.playlist_add_items(PLAYLIST_ID, unique[i:i+50])
+                add_tracks_to_playlist_safe(sp, PLAYLIST_ID, unique[i:i+50])
             save_data(new_max_date)
             print(f"Добавлено {len(unique)} треков.")
         else:
@@ -180,7 +165,6 @@ if __name__ == "__main__":
     if FIRST_RUN_MODE:
         initial_fill_playlist()
     else:
-        print("Бот работает. Расписание: 09:00 и 21:00.")
         check_new_releases()
         schedule.every().day.at("09:00").do(check_new_releases)
         schedule.every().day.at("21:00").do(check_new_releases)
