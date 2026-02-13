@@ -10,15 +10,13 @@ from dotenv import load_dotenv
 
 # ================= НАСТРОЙКИ =================
 STATE_FILE = "bot_state.json"
-# Пауза между запросами (сек), чтобы не злить Spotify
 SAFE_DELAY = 2 
 # =============================================
 
 load_dotenv()
 
-# Проверка ключей
 if not os.getenv("SPOTIPY_CLIENT_ID") or not os.getenv("PLAYLIST_ID"):
-    print("❌ ОШИБКА: Проверь файл .env (CLIENT_ID или PLAYLIST_ID пусты)")
+    print("❌ ОШИБКА: Проверь файл .env")
     sys.exit(1)
 
 CLIENT_ID = os.getenv("SPOTIPY_CLIENT_ID")
@@ -43,11 +41,10 @@ def load_state():
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, 'r') as f:
             return json.load(f)
-    # Начальное состояние
     return {
-        "initial_scan_done": False,       # Завершен ли первый проход?
-        "last_processed_index": 0,        # На каком артисте остановились
-        "last_checked_date": "2000-01-01" # Дата последней проверки новинок
+        "initial_scan_done": False,
+        "last_processed_index": 0,
+        "last_checked_date": "2000-01-01"
     }
 
 def save_state(state):
@@ -55,66 +52,61 @@ def save_state(state):
         json.dump(state, f, indent=4)
 
 def add_tracks_direct(sp, track_uris):
-    """Добавляет треки через новый API (/items)"""
     if not track_uris: return
     try:
-        # Разбиваем на пачки по 50
+        # Пачками по 50 (лимит API)
         for i in range(0, len(track_uris), 50):
             chunk = track_uris[i:i+50]
             url = f"playlists/{PLAYLIST_ID}/items"
             sp._post(url, payload={"uris": chunk})
-            print(f"   ✅ Добавлено {len(chunk)} треков в плейлист.")
+            print(f"   ✅ Добавлено {len(chunk)} треков.")
     except Exception as e:
         print(f"   ❌ Ошибка добавления: {e}")
 
 def handle_rate_limit(e):
-    """Умная обработка лимитов"""
     if hasattr(e, 'http_status') and e.http_status == 429:
         retry_after = int(e.headers.get('Retry-After', 60)) + 5
-        print(f"\n⚠️ ЛИМИТ ЗАПРОСОВ! Spotify просит подождать {retry_after} сек.")
-        print("   💤 Сплю...")
+        print(f"\n⚠️ ЛИМИТ! Жду {retry_after} сек...")
         time.sleep(retry_after)
         return True
     return False
 
-def get_latest_track(sp, artist_id):
-    """Получает 1 последний трек артиста"""
+def get_latest_track_single(sp, artist_id):
+    """
+    ФУНКЦИЯ ДЛЯ ПЕРВОГО ЗАПУСКА
+    Берет СТРОГО 1 трек (limit=1), чтобы создать базу.
+    """
     try:
-        # Ищем альбомы (Украина)
         albums = sp.artist_albums(artist_id, album_type='album,single', country="UA", limit=1)
         if albums['items']:
             latest_album = albums['items'][0]
+            # ТУТ ЛИМИТ 1 — НЕ МЕНЯТЬ!
             tracks = sp.album_tracks(latest_album['id'], limit=1)
             if tracks['items']:
                 return tracks['items'][0]['uri'], latest_album['release_date']
     except Exception as e:
-        # Если словили лимит внутри функции - пробрасываем наверх
-        if hasattr(e, 'http_status') and e.http_status == 429:
-            raise e
-        print(f"   Ошибка трека: {e}")
+        if hasattr(e, 'http_status') and e.http_status == 429: raise e
     return None, None
 
 def run_smart_scan():
-    """Основная логика: Либо докачивает старое, либо ищет новое"""
     state = load_state()
     sp = get_spotify_client()
     
-    print(f"\n[{datetime.now().strftime('%H:%M')}] 🚀 Запуск сканирования...")
+    print(f"\n[{datetime.now().strftime('%H:%M')}] 🚀 Сканирование...")
 
     try:
-        # 1. Получаем всех подписки
         results = sp.current_user_followed_artists(limit=50)
         artists = results['artists']['items']
         while results['artists']['cursors']['after']:
             results = sp.current_user_followed_artists(limit=50, after=results['artists']['cursors']['after'])
             artists.extend(results['artists']['items'])
         
-        print(f"   Всего подписок: {len(artists)}")
+        print(f"   Подписок: {len(artists)}")
 
-        # === РЕЖИМ 1: ПЕРВИЧНОЕ ЗАПОЛНЕНИЕ ===
+        # === РЕЖИМ 1: ПЕРВИЧНОЕ ЗАПОЛНЕНИЕ (По 1 треку) ===
         if not state["initial_scan_done"]:
             start_index = state["last_processed_index"]
-            print(f"   📢 РЕЖИМ: Первое заполнение. Продолжаю с {start_index+1}-го артиста.")
+            print(f"   📢 Продолжаю ПЕРВИЧНОЕ заполнение с {start_index+1}-го артиста.")
             
             latest_global_date = state["last_checked_date"]
             
@@ -122,80 +114,70 @@ def run_smart_scan():
                 artist = artists[i]
                 print(f"   [{i+1}/{len(artists)}] {artist['name']}...", end="\r")
                 
-                track_uri, release_date = get_latest_track(sp, artist['id'])
+                # Используем функцию с лимитом 1
+                track_uri, release_date = get_latest_track_single(sp, artist['id'])
                 
                 if track_uri:
-                    # Сразу добавляем, чтобы не потерять при сбое
                     add_tracks_direct(sp, [track_uri])
                     if release_date > latest_global_date:
                         latest_global_date = release_date
                 
-                # Сохраняем прогресс ПОСЛЕ КАЖДОГО успешного шага
                 state["last_processed_index"] = i + 1
                 state["last_checked_date"] = latest_global_date
                 save_state(state)
-                
-                time.sleep(SAFE_DELAY) # Бережем лимиты
+                time.sleep(SAFE_DELAY)
 
-            # Если дошли до конца без ошибок
-            print("\n   ✅ Первичное заполнение завершено!")
+            print("\n   ✅ База собрана! Перехожу в режим новинок.")
             state["initial_scan_done"] = True
             state["last_processed_index"] = 0
             save_state(state)
 
-        # === РЕЖИМ 2: ПРОВЕРКА НОВИНОК ===
+        # === РЕЖИМ 2: ПРОВЕРКА НОВИНОК (Всё подряд) ===
         else:
-            print(f"   📢 РЕЖИМ: Поиск новинок (свежее {state['last_checked_date']})")
+            print(f"   📢 Ищу новинки (свежее {state['last_checked_date']})...")
             last_date = state["last_checked_date"]
             new_max_date = last_date
             found_tracks = []
             
             for i, artist in enumerate(artists):
-                # Для новинок проверяем быстрее (только дату)
                 try:
                     albums = sp.artist_albums(artist['id'], limit=2, country="UA")
                     for album in albums['items']:
                         if album['release_date'] > last_date:
                             print(f"   🔥 НОВИНКА: {artist['name']} - {album['name']}")
-                            tracks = sp.album_tracks(album['id'], limit=5)
-                            for t in tracks['items']: found_tracks.append(t['uri'])
+                            
+                            # !!! ВОТ ТУТ МЫ СНЯЛИ ЛИМИТ !!!
+                            # limit=50 заберет весь альбом (до 50 треков)
+                            tracks = sp.album_tracks(album['id'], limit=50)
+                            
+                            for t in tracks['items']: 
+                                found_tracks.append(t['uri'])
                             
                             if album['release_date'] > new_max_date:
                                 new_max_date = album['release_date']
-                    time.sleep(0.5) # Маленькая пауза
+                    time.sleep(0.5)
                 except Exception as e:
-                    if handle_rate_limit(e): 
-                        # Если лимит, просто выходим из функции, сохранимся и продолжим в след раз
-                        return 
+                    if handle_rate_limit(e): return 
 
             if found_tracks:
-                unique_tracks = list(set(found_tracks))
-                print(f"   Добавляю {len(unique_tracks)} новых треков...")
-                add_tracks_direct(sp, unique_tracks)
+                unique = list(set(found_tracks))
+                print(f"   Заливаю {len(unique)} новых треков...")
+                add_tracks_direct(sp, unique)
                 state["last_checked_date"] = new_max_date
                 save_state(state)
             else:
-                print("   Новинок не найдено.")
+                print("   Новинок нет.")
 
     except Exception as e:
-        if handle_rate_limit(e):
-            pass # Уже обработали сон
-        else:
-            print(f"\n❌ Критическая ошибка: {e}")
+        if not handle_rate_limit(e):
+            print(f"\n❌ Ошибка: {e}")
 
 if __name__ == "__main__":
-    print("🤖 Бот запущен (v3.0 Smart Resume)")
-    
-    # Запускаем сразу при старте
+    print("🤖 Бот запущен (Full Album Support)")
     run_smart_scan()
-
-    # Планировщик на будущее
     schedule.every().day.at("09:00").do(run_smart_scan)
     schedule.every().day.at("21:00").do(run_smart_scan)
-    
-    # Каждые 6 часов тоже проверим, на всякий случай (умный режим не спамит)
     schedule.every(6).hours.do(run_smart_scan)
-
     while True:
         schedule.run_pending()
         time.sleep(60)
