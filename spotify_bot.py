@@ -10,7 +10,8 @@ from dotenv import load_dotenv
 
 # ================= НАСТРОЙКИ =================
 STATE_FILE = "bot_state.json"
-SAFE_DELAY = 2 
+RUN_TIME = "03:00"  # Время запуска (раз в сутки)
+SAFE_DELAY = 5      # Увеличил паузу для безопасности
 # =============================================
 
 load_dotenv()
@@ -44,7 +45,8 @@ def load_state():
     return {
         "initial_scan_done": False,
         "last_processed_index": 0,
-        "last_checked_date": "2000-01-01"
+        "last_checked_date": "2000-01-01",
+        "last_run_timestamp": 0
     }
 
 def save_state(state):
@@ -74,13 +76,11 @@ def handle_rate_limit(e):
 
 def get_latest_track_smart(sp, artist_id):
     """
-    УМНЫЙ ПОИСК ДЛЯ БАЗЫ:
-    1. Запрашивает 5 последних релизов (И альбомы, И синглы).
-    2. Сортирует их по дате.
-    3. Возвращает самый свежий.
+    УМНЫЙ ПОИСК (БАЗА):
+    Возвращает трек и дату. Тратит 2 запроса!
     """
     try:
-        # ЗАПРОС: include_groups='album,single' критически важен!
+        # ЗАПРОС 1
         results = sp.artist_albums(
             artist_id, 
             album_type='album,single', 
@@ -89,14 +89,12 @@ def get_latest_track_smart(sp, artist_id):
         )
         items = results['items']
         
-        if not items:
-            return None, None
+        if not items: return None, None
 
-        # Сортировка Python (надежнее, чем доверять порядку Spotify)
         sorted_releases = sorted(items, key=lambda x: x['release_date'], reverse=True)
         latest_release = sorted_releases[0]
         
-        # Берем 1 трек для базы
+        # ЗАПРОС 2
         tracks = sp.album_tracks(latest_release['id'], limit=1)
         if tracks['items']:
             return tracks['items'][0]['uri'], latest_release['release_date']
@@ -105,11 +103,17 @@ def get_latest_track_smart(sp, artist_id):
         if hasattr(e, 'http_status') and e.http_status == 429: raise e
     return None, None
 
-def run_smart_scan():
+def run_daily_safe_scan():
     state = load_state()
-    sp = get_spotify_client()
     
-    print(f"\n[{datetime.now().strftime('%H:%M')}] 🚀 Умное сканирование...")
+    # 1. Проверка: запускались ли сегодня?
+    last_run = datetime.fromtimestamp(state.get("last_run_timestamp", 0))
+    if last_run.date() == datetime.now().date() and state["initial_scan_done"]:
+        print(f"[{datetime.now().strftime('%H:%M')}] ✋ Лимит на сегодня исчерпан (бот уже работал). Жду {RUN_TIME}.")
+        return
+
+    sp = get_spotify_client()
+    print(f"\n[{datetime.now().strftime('%H:%M')}] 🚀 Ежедневный запуск (Лимит ~100)...")
 
     try:
         results = sp.current_user_followed_artists(limit=50)
@@ -119,20 +123,29 @@ def run_smart_scan():
             artists.extend(results['artists']['items'])
         
         print(f"   Подписок: {len(artists)}")
+        
+        requests_today = 0
+        limit_reached = False
 
-        # === РЕЖИМ 1: ПЕРВИЧНОЕ ЗАПОЛНЕНИЕ (Smart Sort) ===
+        # === РЕЖИМ 1: ПЕРВИЧНОЕ ЗАПОЛНЕНИЕ ===
         if not state["initial_scan_done"]:
             start_index = state["last_processed_index"]
             print(f"   📢 Продолжаю базу с {start_index+1}-го артиста.")
-            
             latest_global_date = state["last_checked_date"]
             
             for i in range(start_index, len(artists)):
+                # ПРОВЕРКА ЛИМИТА
+                if requests_today >= 95:
+                    print("\n   🛑 Дневной лимит (95 запросов) достигнут. Пауза до завтра.")
+                    limit_reached = True
+                    break
+
                 artist = artists[i]
                 print(f"   [{i+1}/{len(artists)}] {artist['name']}...", end="\r")
                 
-                # Используем УМНЫЙ поиск (видит синглы)
+                # Тратим 2 запроса
                 track_uri, release_date = get_latest_track_smart(sp, artist['id'])
+                requests_today += 2
                 
                 if track_uri:
                     add_tracks_direct(sp, [track_uri])
@@ -144,12 +157,20 @@ def run_smart_scan():
                 save_state(state)
                 time.sleep(SAFE_DELAY)
 
-            print("\n   ✅ База собрана! Перехожу в режим новинок.")
-            state["initial_scan_done"] = True
-            state["last_processed_index"] = 0
-            save_state(state)
+            if not limit_reached:
+                print("\n   ✅ База собрана! Завтра начнем искать новинки.")
+                state["initial_scan_done"] = True
+                state["last_processed_index"] = 0
+                # Ставим метку, что на сегодня всё
+                state["last_run_timestamp"] = datetime.now().timestamp()
+                save_state(state)
+            else:
+                # Если уперлись в лимит, метку времени НЕ ставим, 
+                # но так как requests_today > 95, он сам остановится в начале
+                state["last_run_timestamp"] = datetime.now().timestamp()
+                save_state(state)
 
-        # === РЕЖИМ 2: НОВИНКИ (Full Album + Singles) ===
+        # === РЕЖИМ 2: НОВИНКИ (Single + Album) ===
         else:
             print(f"   📢 Ищу новинки (свежее {state['last_checked_date']})...")
             last_date = state["last_checked_date"]
@@ -157,50 +178,63 @@ def run_smart_scan():
             found_tracks = []
             
             for i, artist in enumerate(artists):
+                # ПРОВЕРКА ЛИМИТА
+                if requests_today >= 95:
+                    print("\n   ⚠️ Лимит 95 запросов. Останавливаю поиск на сегодня.")
+                    break
+
                 try:
-                    # ЗАПРОС: Ищем 5 последних релизов (И альбомы, И синглы)
+                    # 1 ЗАПРОС
                     albums = sp.artist_albums(
                         artist['id'], 
                         limit=5, 
-                        album_type='album,single', # <-- ВАЖНО
+                        album_type='album,single', 
                         country="UA"
                     )
+                    requests_today += 1
                     
                     for album in albums['items']:
                         if album['release_date'] > last_date:
                             print(f"   🔥 НОВИНКА: {artist['name']} - {album['name']}")
                             
-                            # Скачиваем ВЕСЬ релиз (до 50 треков)
+                            # Качаем треки (Доп. запрос)
                             tracks = sp.album_tracks(album['id'], limit=50)
+                            requests_today += 1
                             
                             for t in tracks['items']: 
                                 found_tracks.append(t['uri'])
                             
                             if album['release_date'] > new_max_date:
                                 new_max_date = album['release_date']
-                    time.sleep(0.5)
+                    time.sleep(SAFE_DELAY)
                 except Exception as e:
-                    if handle_rate_limit(e): return 
+                    if handle_rate_limit(e): break
 
             if found_tracks:
                 unique = list(set(found_tracks))
                 print(f"   Заливаю {len(unique)} новых треков...")
                 add_tracks_direct(sp, unique)
                 state["last_checked_date"] = new_max_date
-                save_state(state)
             else:
-                print("   Новинок нет.")
+                print(f"   Новинок нет. Потрачено запросов: {requests_today}")
+            
+            # Записываем, что на сегодня работа выполнена
+            state["last_run_timestamp"] = datetime.now().timestamp()
+            save_state(state)
 
     except Exception as e:
         if not handle_rate_limit(e):
             print(f"\n❌ Ошибка: {e}")
 
 if __name__ == "__main__":
-    print("🤖 Бот запущен (v4.0 Final: Singles + Albums)")
-    run_smart_scan()
-    schedule.every().day.at("09:00").do(run_smart_scan)
-    schedule.every().day.at("21:00").do(run_smart_scan)
-    schedule.every(6).hours.do(run_smart_scan)
+    print(f"🤖 Бот запущен (Safe Mode: 1 раз в сутки в {RUN_TIME})")
+    
+    # Пробуем запустить сразу при старте (если сегодня еще не работал)
+    run_daily_safe_scan()
+    
+    # Ставим в расписание
+    schedule.every().day.at(RUN_TIME).do(run_daily_safe_scan)
+    
     while True:
         schedule.run_pending()
         time.sleep(60)
