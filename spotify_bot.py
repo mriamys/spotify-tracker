@@ -66,24 +66,41 @@ def add_tracks_direct(sp, track_uris):
 def handle_rate_limit(e):
     if hasattr(e, 'http_status') and e.http_status == 429:
         retry_after = int(e.headers.get('Retry-After', 60)) + 5
-        print(f"\n⚠️ ЛИМИТ! Жду {retry_after} сек...")
+        print(f"\n⚠️ ЛИМИТ! Spotify просит подождать {retry_after} сек.")
+        print("   💤 Сплю (не выключай меня)...")
         time.sleep(retry_after)
         return True
     return False
 
-def get_latest_track_single(sp, artist_id):
+def get_latest_track_smart(sp, artist_id):
     """
-    ФУНКЦИЯ ДЛЯ ПЕРВОГО ЗАПУСКА
-    Берет СТРОГО 1 трек (limit=1), чтобы создать базу.
+    УМНЫЙ ПОИСК ДЛЯ БАЗЫ:
+    1. Запрашивает 5 последних релизов (И альбомы, И синглы).
+    2. Сортирует их по дате.
+    3. Возвращает самый свежий.
     """
     try:
-        albums = sp.artist_albums(artist_id, album_type='album,single', country="UA", limit=1)
-        if albums['items']:
-            latest_album = albums['items'][0]
-            # ТУТ ЛИМИТ 1 — НЕ МЕНЯТЬ!
-            tracks = sp.album_tracks(latest_album['id'], limit=1)
-            if tracks['items']:
-                return tracks['items'][0]['uri'], latest_album['release_date']
+        # ЗАПРОС: include_groups='album,single' критически важен!
+        results = sp.artist_albums(
+            artist_id, 
+            album_type='album,single', 
+            country="UA", 
+            limit=5
+        )
+        items = results['items']
+        
+        if not items:
+            return None, None
+
+        # Сортировка Python (надежнее, чем доверять порядку Spotify)
+        sorted_releases = sorted(items, key=lambda x: x['release_date'], reverse=True)
+        latest_release = sorted_releases[0]
+        
+        # Берем 1 трек для базы
+        tracks = sp.album_tracks(latest_release['id'], limit=1)
+        if tracks['items']:
+            return tracks['items'][0]['uri'], latest_release['release_date']
+            
     except Exception as e:
         if hasattr(e, 'http_status') and e.http_status == 429: raise e
     return None, None
@@ -92,7 +109,7 @@ def run_smart_scan():
     state = load_state()
     sp = get_spotify_client()
     
-    print(f"\n[{datetime.now().strftime('%H:%M')}] 🚀 Сканирование...")
+    print(f"\n[{datetime.now().strftime('%H:%M')}] 🚀 Умное сканирование...")
 
     try:
         results = sp.current_user_followed_artists(limit=50)
@@ -103,10 +120,10 @@ def run_smart_scan():
         
         print(f"   Подписок: {len(artists)}")
 
-        # === РЕЖИМ 1: ПЕРВИЧНОЕ ЗАПОЛНЕНИЕ (По 1 треку) ===
+        # === РЕЖИМ 1: ПЕРВИЧНОЕ ЗАПОЛНЕНИЕ (Smart Sort) ===
         if not state["initial_scan_done"]:
             start_index = state["last_processed_index"]
-            print(f"   📢 Продолжаю ПЕРВИЧНОЕ заполнение с {start_index+1}-го артиста.")
+            print(f"   📢 Продолжаю базу с {start_index+1}-го артиста.")
             
             latest_global_date = state["last_checked_date"]
             
@@ -114,8 +131,8 @@ def run_smart_scan():
                 artist = artists[i]
                 print(f"   [{i+1}/{len(artists)}] {artist['name']}...", end="\r")
                 
-                # Используем функцию с лимитом 1
-                track_uri, release_date = get_latest_track_single(sp, artist['id'])
+                # Используем УМНЫЙ поиск (видит синглы)
+                track_uri, release_date = get_latest_track_smart(sp, artist['id'])
                 
                 if track_uri:
                     add_tracks_direct(sp, [track_uri])
@@ -132,7 +149,7 @@ def run_smart_scan():
             state["last_processed_index"] = 0
             save_state(state)
 
-        # === РЕЖИМ 2: ПРОВЕРКА НОВИНОК (Всё подряд) ===
+        # === РЕЖИМ 2: НОВИНКИ (Full Album + Singles) ===
         else:
             print(f"   📢 Ищу новинки (свежее {state['last_checked_date']})...")
             last_date = state["last_checked_date"]
@@ -141,13 +158,19 @@ def run_smart_scan():
             
             for i, artist in enumerate(artists):
                 try:
-                    albums = sp.artist_albums(artist['id'], limit=2, country="UA")
+                    # ЗАПРОС: Ищем 5 последних релизов (И альбомы, И синглы)
+                    albums = sp.artist_albums(
+                        artist['id'], 
+                        limit=5, 
+                        album_type='album,single', # <-- ВАЖНО
+                        country="UA"
+                    )
+                    
                     for album in albums['items']:
                         if album['release_date'] > last_date:
                             print(f"   🔥 НОВИНКА: {artist['name']} - {album['name']}")
                             
-                            # !!! ВОТ ТУТ МЫ СНЯЛИ ЛИМИТ !!!
-                            # limit=50 заберет весь альбом (до 50 треков)
+                            # Скачиваем ВЕСЬ релиз (до 50 треков)
                             tracks = sp.album_tracks(album['id'], limit=50)
                             
                             for t in tracks['items']: 
@@ -173,7 +196,7 @@ def run_smart_scan():
             print(f"\n❌ Ошибка: {e}")
 
 if __name__ == "__main__":
-    print("🤖 Бот запущен (Full Album Support)")
+    print("🤖 Бот запущен (v4.0 Final: Singles + Albums)")
     run_smart_scan()
     schedule.every().day.at("09:00").do(run_smart_scan)
     schedule.every().day.at("21:00").do(run_smart_scan)
