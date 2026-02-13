@@ -2,15 +2,13 @@ import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 from dotenv import load_dotenv
 import os
-import sys
 
 load_dotenv()
 
-# Имя плейлиста
-NEW_PLAYLIST_NAME = "Spotify Tracker (Safe)"
+# Используем "Safe" плейлист или создадим новый
+NEW_PLAYLIST_NAME = "Spotify Tracker 2026"
 
 def main():
-    # Авторизация
     sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
         client_id=os.getenv("SPOTIPY_CLIENT_ID"),
         client_secret=os.getenv("SPOTIPY_CLIENT_SECRET"),
@@ -20,42 +18,38 @@ def main():
         cache_handler=spotipy.cache_handler.CacheFileHandler(cache_path=".cache")
     ))
 
-    print("\n--- БЫСТРАЯ НАСТРОЙКА (БЕЗ СПАМА API) ---")
+    print("\n--- ТЕСТ НОВОГО API (FEBRUARY 2026 FIX) ---")
     
     try:
-        # 1. Получаем ID юзера
         user_id = sp.current_user()['id']
         print(f"👤 Пользователь: {user_id}")
 
-        # 2. Создаем плейлист (ПРЯМОЙ ЗАПРОС)
+        # 1. Создаем плейлист через /me/playlists (это работает)
         print("🔨 Создаю плейлист...")
-        payload = {
-            "name": NEW_PLAYLIST_NAME,
-            "public": False, 
-            "description": "Created by Bot"
-        }
+        payload = {"name": NEW_PLAYLIST_NAME, "public": False}
         res = sp._post("me/playlists", payload=payload)
         new_playlist_id = res['id']
         print(f"✅ Плейлист создан! ID: {new_playlist_id}")
 
-        # 3. Тест записи (добавим 1 трек, чтобы убедиться, что права работают)
-        print("🧪 Проверяю права на запись (добавляю 1 трек)...")
-        # Тестовый трек: Never Gonna Give You Up (для проверки)
-        test_track = "spotify:track:4cOdK2wGLETKBW3PvgPWqT"
+        # 2. ДОБАВЛЯЕМ ТРЕК ЧЕРЕЗ НОВЫЙ АДРЕС /items
+        print("🧪 Пробую добавить трек через /items ...")
+        test_track = "spotify:track:4cOdK2wGLETKBW3PvgPWqT" # Never Gonna Give You Up
         
-        url = f"playlists/{new_playlist_id}/tracks"
+        # !!! ВОТ ОНО - ИСПРАВЛЕНИЕ !!!
+        # Старый адрес: playlists/{id}/tracks (удален)
+        # Новый адрес:  playlists/{id}/items
+        url = f"playlists/{new_playlist_id}/items"
+        
         sp._post(url, payload={"uris": [test_track]})
-        print("✅ Трек добавлен! Ошибки 403 НЕТ.")
-
+        
+        print(f"✅ УСПЕХ! Трек добавлен. Ошибка 403 побеждена.")
         print("\n" + "="*50)
-        print("🎉 ВСЁ ГОТОВО! СКОПИРУЙ ЭТОТ ID В .env:")
-        print(f"\n{new_playlist_id}\n")
+        print("СКОПИРУЙ ЭТОТ ID В .env:")
+        print(f"{new_playlist_id}")
         print("="*50)
 
     except Exception as e:
         print(f"\n❌ ОШИБКА: {e}")
-        if "403" in str(e):
-            print("⚠️ Причина: Вы забыли добавить почту в User Management на сайте Spotify!")
 
 if __name__ == "__main__":
     main()
