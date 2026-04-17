@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 # ================= НАСТРОЙКИ =================
 STATE_FILE = "bot_state.json"
 RUN_TIME = "03:00"  # Время запуска (раз в сутки)
-SAFE_DELAY = 3      # Пауза между запросами (секунды)
+SAFE_DELAY = 5      # Увеличил паузу для надежности
 # =============================================
 
 load_dotenv()
@@ -36,7 +36,8 @@ def get_spotify_client():
         open_browser=False,
         cache_handler=spotipy.cache_handler.CacheFileHandler(cache_path=".cache")
     )
-    return spotipy.Spotify(auth_manager=auth_manager)
+    # Отключаем встроенные ретрии спотипая, чтобы он не засыпал на 24 часа внутри себя
+    return spotipy.Spotify(auth_manager=auth_manager, retries=0, status_retries=0)
 
 def load_state():
     if os.path.exists(STATE_FILE):
@@ -73,50 +74,52 @@ def handle_rate_limit(e):
     """Обрабатывает ошибку rate limit от Spotify"""
     if hasattr(e, 'http_status') and e.http_status == 429:
         retry_after = int(e.headers.get('Retry-After', 60)) + 5
+        
+        # Если просят ждать слишком долго (больше часа) - лучше сдаться и попробовать завтра
+        if retry_after > 3600:
+            print(f"\n🛑 ЖЕСТКИЙ ЛИМИТ 429! Spotify просит подождать {retry_after} сек (отдыхаем до завтра).")
+            return "STOP"
+            
         print(f"\n⚠️ ЛИМИТ 429! Spotify просит подождать {retry_after} сек.")
         print("   💤 Сплю (не выключай меня)...")
         time.sleep(retry_after)
-        return True
+        return "RETRY"
     return False
 
 def get_artist_releases(sp, artist_id, limit_per_type=20):
     """
-    Получает релизы артиста (альбомы и синглы).
+    Получает релизы артиста (альбомы и синглы за один запрос).
     """
     all_releases = []
+    offset = 0
     
-    for release_type in ['album', 'single']:
-        offset = 0
-        type_releases = []
-        
-        while len(type_releases) < limit_per_type:
-            try:
-                results = sp.artist_albums(
-                    artist_id,
-                    include_groups=release_type,
-                    country="UA",
-                    limit=10,
-                    offset=offset
-                )
-                
-                items = results.get('items', [])
-                if not items:
-                    break
-                
-                type_releases.extend(items)
-                
-                if results.get('next') is None:
-                    break
-                
-                offset += 10
-                
-            except Exception as e:
-                if hasattr(e, 'http_status') and e.http_status == 429:
-                    raise e  # Пробрасываем rate limit наверх
-                print(f"      ⚠️ Ошибка при получении {release_type}: {e}")
+    while len(all_releases) < limit_per_type * 2:
+        try:
+            # ОПТИМИЗАЦИЯ: запрашиваем всё сразу через запятую
+            results = sp.artist_albums(
+                artist_id,
+                include_groups='album,single',
+                country="UA",
+                limit=20, # берем побольше
+                offset=offset
+            )
+            
+            items = results.get('items', [])
+            if not items:
                 break
-        
-        all_releases.extend(type_releases[:limit_per_type])
+            
+            all_releases.extend(items)
+            
+            if results.get('next') is None or len(all_releases) >= limit_per_type * 2:
+                break
+            
+            offset += 20
+            
+        except Exception as e:
+            if hasattr(e, 'http_status') and e.http_status == 429:
+                raise e
+            print(f"      ⚠️ Ошибка при получении релизов: {e}")
+            break
     
     return all_releases
 
@@ -154,38 +157,32 @@ def get_latest_track_smart(sp, artist_id):
         return None, None
 
 def run_daily_safe_scan():
-    """
-    Основная функция бота - ежедневное сканирование.
-    
-    КАК РАБОТАЕТ:
-    
-    1. ПЕРВЫЙ ЗАПУСК (initial_scan_done=false):
-       - Добавляет ПО 1 ТРЕКУ из последнего релиза каждого артиста
-       - СОХРАНЯЕТ ПРОГРЕСС после каждого артиста
-       - Если влетит в лимит 429 - ждет сколько скажет Spotify и продолжает
-    
-    2. МОНИТОРИНГ (initial_scan_done=true):
-       - Проверяет ОДИН РАЗ В СУТКИ всех артистов
-       - СРАЗУ добавляет треки при находке нового релиза
-       - Если влетит в лимит 429 - ждет и продолжает с того же места
-    """
+    """ Основная функция бота """
     state = load_state()
     
-    # ═══════════════════════════════════════════════════════
-    # ЖЕСТКИЙ ЛИМИТ: ОДИН РАЗ В 24 ЧАСА
-    # ═══════════════════════════════════════════════════════
     last_run = datetime.fromtimestamp(state.get("last_run_timestamp", 0))
     current_date = datetime.now().date()
     
-    # Проверка: если уже работали сегодня И первичное сканирование завершено
     if last_run.date() == current_date and state["initial_scan_done"]:
-        # НО! Если мониторинг не завершен (monitoring_index > 0), разрешаем продолжить
         if state.get("monitoring_index", 0) == 0:
             print(f"[{datetime.now().strftime('%H:%M')}] ✋ Лимит на сегодня исчерпан (бот уже работал сегодня).")
-            print(f"   ⏰ Следующий запуск в {RUN_TIME}")
             return
     
     sp = get_spotify_client()
+    
+    # ПРИНУДИТЕЛЬНОЕ ОБНОВЛЕНИЕ ТОКЕНА
+    try:
+        print("   🔐 Проверка авторизации...")
+        sp.auth_manager.get_access_token(as_dict=False)
+    except Exception as e:
+        print(f"   ❌ Ошибка обновления токена: {e}")
+        return
+ 
+    # Фиксируем запуск ПЕРЕД началом (защита от дублей при сбое)
+    if state.get("monitoring_index", 0) == 0:
+        state["last_run_timestamp"] = datetime.now().timestamp()
+        save_state(state)
+ 
     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 🚀 Запуск сканирования...")
 
     try:
@@ -241,11 +238,12 @@ def run_daily_safe_scan():
                     time.sleep(SAFE_DELAY)
                     
                 except Exception as e:
-                    if handle_rate_limit(e):
-                        # После ожидания - просто продолжаем (не прерываемся)
-                        # Повторяем этого же артиста
+                    res = handle_rate_limit(e)
+                    if res == "RETRY":
                         i -= 1
                         continue
+                    elif res == "STOP":
+                        return
                     print(f"❌ {e}")
 
             # Первичное сканирование ПОЛНОСТЬЮ завершено
@@ -327,13 +325,14 @@ def run_daily_safe_scan():
                     i += 1
                     
                 except Exception as e:
-                    if handle_rate_limit(e):
-                        # После ожидания - сохраняем прогресс и продолжаем с ТОГО ЖЕ артиста
+                    res = handle_rate_limit(e)
+                    if res == "RETRY":
                         state["monitoring_index"] = i
                         state["last_checked_date"] = new_max_date
                         save_state(state)
-                        # НЕ увеличиваем i - повторим этого же артиста
                         continue
+                    elif res == "STOP":
+                        return
                     print(f"❌ {e}")
                     i += 1
 
