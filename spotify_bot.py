@@ -86,7 +86,7 @@ def handle_rate_limit(e):
         return "RETRY"
     return False
 
-def get_artist_releases(sp, artist_id, limit_per_type=20):
+def get_artist_releases(sp, artist_id, limit_per_type=10):
     """
     Получает релизы артиста (альбомы и синглы за один запрос).
     """
@@ -100,7 +100,7 @@ def get_artist_releases(sp, artist_id, limit_per_type=20):
                 artist_id,
                 include_groups='album,single',
                 country="UA",
-                limit=20, # берем побольше
+                limit=10, # Spotify сейчас ругается на 20+
                 offset=offset
             )
             
@@ -210,6 +210,7 @@ def run_daily_safe_scan():
             start_index = state["last_processed_index"]
             latest_global_date = state["last_checked_date"]
             
+            consecutive_errors = 0
             for i in range(start_index, len(artists)):
                 artist = artists[i]
                 print(f"   [{i+1}/{len(artists)}] {artist['name'][:30]}...", end=" ")
@@ -235,9 +236,15 @@ def run_daily_safe_scan():
                     state["last_checked_date"] = latest_global_date
                     save_state(state)
                     
+                    consecutive_errors = 0 # Сброс при успехе
                     time.sleep(SAFE_DELAY)
                     
                 except Exception as e:
+                    consecutive_errors += 1
+                    if consecutive_errors > 5:
+                        print(f"\n🛑 Слишком много ошибок подряд ({consecutive_errors})! Останавливаюсь.")
+                        return
+                        
                     res = handle_rate_limit(e)
                     if res == "RETRY":
                         i -= 1
@@ -273,6 +280,7 @@ def run_daily_safe_scan():
             last_global_date = state["last_checked_date"]
             new_max_date = last_global_date
             
+            consecutive_errors = 0
             i = start_monitoring_index
             while i < len(artists):
                 artist = artists[i]
@@ -321,10 +329,16 @@ def run_daily_safe_scan():
                     if not found_new:
                         print("—")
                     
+                    consecutive_errors = 0 # Сброс при успехе
                     time.sleep(SAFE_DELAY)
                     i += 1
                     
                 except Exception as e:
+                    consecutive_errors += 1
+                    if consecutive_errors > 5:
+                        print(f"\n🛑 Слишком много ошибок подряд ({consecutive_errors})! Останавливаюсь.")
+                        return
+
                     res = handle_rate_limit(e)
                     if res == "RETRY":
                         state["monitoring_index"] = i
