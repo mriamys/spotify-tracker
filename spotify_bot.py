@@ -113,7 +113,7 @@ def get_artist_releases(sp, artist_id, limit_per_type=10):
             if results.get('next') is None or len(all_releases) >= limit_per_type * 2:
                 break
             
-            offset += 20
+            offset += 10
             
         except Exception as e:
             if hasattr(e, 'http_status') and e.http_status == 429:
