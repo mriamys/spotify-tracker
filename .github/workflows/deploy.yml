@@ -1,0 +1,24 @@
+name: Deploy Spotify Tracker Bot
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy to VPS via SSH Password
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: root
+          password: ${{ secrets.SSH_PASSWORD }}
+          script: |
+            cd /root/spotify_tracker
+            git pull origin main
+            source venv/bin/activate
+            pip install -r requirements.txt
+            systemctl restart spotify
