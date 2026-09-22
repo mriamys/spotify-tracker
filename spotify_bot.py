@@ -96,38 +96,43 @@ def handle_rate_limit(e):
 
 def get_artist_releases(sp, artist_id, limit_per_type=10):
     """
-    Получает релизы артиста (альбомы и синглы за один запрос).
+    Получает релизы артиста: альбомы, синглы (включая EP) и appears_on (фиты).
+    Делаем ОТДЕЛЬНЫЕ запросы для каждого типа — так рекомендует документация Spotify,
+    потому что комбинирование групп через запятую ломает пагинацию (баг API).
     """
     all_releases = []
-    offset = 0
 
-    while len(all_releases) < limit_per_type * 2:
-        try:
-            # ОПТИМИЗАЦИЯ: запрашиваем всё сразу через запятую
-            results = sp.artist_albums(
-                artist_id,
-                include_groups="album,single",
-                country="UA",
-                limit=10,  # Spotify сейчас ругается на 20+
-                offset=offset,
-            )
+    for group in ["album", "single", "appears_on"]:
+        offset = 0
+        group_count = 0
 
-            items = results.get("items", [])
-            if not items:
+        while group_count < limit_per_type:
+            try:
+                results = sp.artist_albums(
+                    artist_id,
+                    include_groups=group,
+                    country="UA",
+                    limit=10,
+                    offset=offset,
+                )
+
+                items = results.get("items", [])
+                if not items:
+                    break
+
+                all_releases.extend(items)
+                group_count += len(items)
+
+                if results.get("next") is None or group_count >= limit_per_type:
+                    break
+
+                offset += 10
+
+            except Exception as e:
+                if hasattr(e, "http_status") and e.http_status == 429:
+                    raise e
+                print(f"      ⚠️ Ошибка при получении релизов [{group}]: {e}")
                 break
-
-            all_releases.extend(items)
-
-            if results.get("next") is None or len(all_releases) >= limit_per_type * 2:
-                break
-
-            offset += 10
-
-        except Exception as e:
-            if hasattr(e, "http_status") and e.http_status == 429:
-                raise e
-            print(f"      ⚠️ Ошибка при получении релизов: {e}")
-            break
 
     return all_releases
 
@@ -307,7 +312,7 @@ def run_daily_safe_scan():
                 print(f"   [{i+1}/{len(artists)}] {artist['name'][:30]}...", end=" ")
 
                 try:
-                    # Получаем релизы артиста
+                    # Получаем релизы артиста (album + single + appears_on)
                     releases = get_artist_releases(sp, artist_id, limit_per_type=5)
 
                     found_new = False
@@ -317,15 +322,29 @@ def run_daily_safe_scan():
                         # Проверяем: это новый релиз?
                         if release_date > artist_last_date:
                             release_type = release.get("album_type", "release")
-                            print(
-                                f"\n      🔥 НОВИНКА: {release['name']} [{release_type}] [{release_date}]"
-                            )
+                            album_group = release.get("album_group", release_type)
 
-                            # Получаем ВСЕ ТРЕКИ из нового релиза
+                            # Получаем треки из нового релиза
                             tracks = sp.album_tracks(release["id"], limit=50)
 
-                            track_uris = [t["uri"] for t in tracks["items"]]
+                            if album_group == "appears_on":
+                                # Для фитов — добавляем ТОЛЬКО треки где наш артист есть
+                                track_uris = [
+                                    t["uri"] for t in tracks["items"]
+                                    if any(a["id"] == artist_id for a in t.get("artists", []))
+                                ]
+                                if not track_uris:
+                                    continue  # Артиста нет ни в одном треке — пропускаем
+                                feat_label = "[feat]"
+                            else:
+                                # Для своих релизов — все треки
+                                track_uris = [t["uri"] for t in tracks["items"]]
+                                feat_label = ""
+
                             track_count = len(track_uris)
+                            print(
+                                f"\n      🔥 НОВИНКА: {release['name']} [{release_type}]{feat_label} [{release_date}]"
+                            )
                             print(f"         ➕ Добавляю {track_count} треков...")
 
                             # СРАЗУ добавляем в плейлист!
