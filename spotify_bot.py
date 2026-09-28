@@ -38,7 +38,7 @@ def get_spotify_client():
         cache_handler=spotipy.cache_handler.CacheFileHandler(cache_path=".cache"),
     )
     # Отключаем встроенные ретрии спотипая, чтобы он не засыпал на 24 часа внутри себя
-    return spotipy.Spotify(auth_manager=auth_manager, retries=0, status_retries=0)
+    return spotipy.Spotify(auth_manager=auth_manager, retries=0, status_retries=0, requests_timeout=30)
 
 
 def load_state():
@@ -374,22 +374,35 @@ def run_daily_safe_scan():
                     i += 1
 
                 except Exception as e:
-                    consecutive_errors += 1
-                    if consecutive_errors > 5:
-                        print(
-                            f"\n🛑 Слишком много ошибок подряд ({consecutive_errors})! Останавливаюсь."
-                        )
-                        return
-
                     res = handle_rate_limit(e)
                     if res == "RETRY":
+                        # При 429: сохраняем прогресс, сбрасываем счётчик ошибок и повторяем
+                        consecutive_errors = 0
                         state["monitoring_index"] = i
                         state["last_checked_date"] = new_max_date
                         save_state(state)
                         continue
                     elif res == "STOP":
+                        # Жёсткий лимит — сохраняем где остановились, завтра продолжим
+                        state["monitoring_index"] = i
+                        state["last_checked_date"] = new_max_date
+                        state["last_run_timestamp"] = datetime.now().timestamp()
+                        save_state(state)
                         return
-                    print(f"❌ {e}")
+
+                    # Другие ошибки (timeout, сеть и т.д.)
+                    consecutive_errors += 1
+                    if consecutive_errors > 10:
+                        print(
+                            f"\n🛑 Слишком много ошибок подряд ({consecutive_errors})! Сохраняю прогресс."
+                        )
+                        state["monitoring_index"] = i
+                        state["last_checked_date"] = new_max_date
+                        state["last_run_timestamp"] = datetime.now().timestamp()
+                        save_state(state)
+                        return
+                    print(f"❌ {e} (попытка {consecutive_errors}/10, продолжаю)")
+                    time.sleep(SAFE_DELAY)
                     i += 1
 
             # Мониторинг ПОЛНОСТЬЮ завершен
