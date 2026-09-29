@@ -324,11 +324,13 @@ def run_daily_safe_scan():
                             release_type = release.get("album_type", "release")
                             album_group = release.get("album_group", release_type)
 
-                            # Получаем треки из нового релиза
-                            tracks = sp.album_tracks(release["id"], limit=50)
+                            # Сборники пропускаем всегда — там чужие треки, мусор
+                            if release_type == "compilation":
+                                continue
 
                             if album_group == "appears_on":
-                                # Для фитов — добавляем ТОЛЬКО треки где наш артист есть
+                                # Для фитов — запрашиваем треки и берём только те где наш артист
+                                tracks = sp.album_tracks(release["id"], limit=50)
                                 track_uris = [
                                     t["uri"] for t in tracks["items"]
                                     if any(a["id"] == artist_id for a in t.get("artists", []))
@@ -337,7 +339,8 @@ def run_daily_safe_scan():
                                     continue  # Артиста нет ни в одном треке — пропускаем
                                 feat_label = "[feat]"
                             else:
-                                # Для своих релизов — все треки
+                                # Для своих альбомов/синглов — все треки
+                                tracks = sp.album_tracks(release["id"], limit=50)
                                 track_uris = [t["uri"] for t in tracks["items"]]
                                 feat_label = ""
 
