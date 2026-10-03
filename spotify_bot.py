@@ -64,15 +64,12 @@ def add_tracks_direct(sp, track_uris):
     """Добавляет треки в плейлист пачками по 50"""
     if not track_uris:
         return
-    try:
-        # Пачками по 50 (лимит API)
-        for i in range(0, len(track_uris), 50):
-            chunk = track_uris[i : i + 50]
-            url = f"playlists/{PLAYLIST_ID}/items"
-            sp._post(url, payload={"uris": chunk})
-            print(f"   ✅ Добавлено {len(chunk)} треков.")
-    except Exception as e:
-        print(f"   ❌ Ошибка добавления: {e}")
+    # Пачками по 50 (лимит API)
+    for i in range(0, len(track_uris), 50):
+        chunk = track_uris[i : i + 50]
+        url = f"playlists/{PLAYLIST_ID}/items"
+        sp._post(url, payload={"uris": chunk})
+        print(f"   ✅ Добавлено {len(chunk)} треков.")
 
 
 def handle_rate_limit(e):
