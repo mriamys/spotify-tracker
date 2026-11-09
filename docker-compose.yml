@@ -1,0 +1,20 @@
+services:
+  spotify-tracker:
+    build: .
+    container_name: spotify-tracker
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - .:/app
+    deploy:
+      resources:
+        reservations:
+          memory: 15M
+    networks:
+      - bots-net
+
+networks:
+  bots-net:
+    external: true
